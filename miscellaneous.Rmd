@@ -1,0 +1,232 @@
+---
+title: "Miscellaneous groups"
+author: "Alberto Rovellini"
+date: "12/3/2021"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(rbgm)
+library(sf)
+library(maps)
+library(mapdata)
+library(viridis)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+This document produces the S1-S4 parameters for a few more groups that could not be mapped with the sdmTMB and bias correction workflow, for example because of limited data points, but do not have any better source for their distributions.
+
+# Approximation of boxes in British COlumbia based on biomass at similar depth in Alaska
+
+We have some cases where the sdmTMB model for a group converged for the RACE data (skills vary) but not for the DFO data. For this reason, we cannot apply the bias correction because there are just not enough data points to calculate the correction factor. However, in some cases there is not much else to go off, and so we rely on the distributions predicted with the RACE data and map those values to boxes in BC based on depth.
+
+Read in model mask and coast.
+```{r}
+atlantis_bgm <- read_bgm('data/GOA_WGS84_V4_final.bgm')
+atlantis_box <- atlantis_bgm %>% box_sf()
+atlantis_bbox <- atlantis_box %>% st_bbox()
+atlantis_crs <- atlantis_bgm$extra$projection
+
+# some coast
+# add coastline 
+coast <- map("worldHires", regions = c("USA","Canada"), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf() %>% st_transform(crs=atlantis_crs) %>% st_combine()
+```
+
+## Forage fish slope
+
+FOS converged and was scored as 3 with sdmTMB and the RACE-GAP data, and converged and was scored as 4 for the DFO data. Data points in the DFO data were minimal. However, no distribution maps exist for Myctophids and Bathylagids. Because the distributions we derive from sdmTMB, although unreliable, place them on the slope and deeper gullies on the shelf, we may deem them to be reasonable enough for this purpose here.
+
+Write a function that fills empty boxes in British Columbia with mean abundances from boxes in the same depth stratum from Alaska. It also fills in zero boxes with the lowest proportion in the model domain, takingit out of the largest proportion.
+```{r}
+afsc_path <- '../sdmTMB_stages/output/cpue_tables/'
+
+fill_BC_and_zeroes <- function(this_path,this_group){
+  
+  afsc_data <- read.csv(paste0(this_path,this_group,'.csv'))
+  
+  all_boxes <- atlantis_box %>%
+    select(box_id,area,botz,boundary) %>%
+    left_join(afsc_data %>% select(box_id,all_years_kgkm2,biomass), by = 'box_id') %>%
+    mutate(biomass = replace_na(biomass,0),
+           all_years_kgkm2 = replace_na(all_years_kgkm2,0)) 
+  
+  AFSC_boxes <- all_boxes %>% filter(box_id<92)
+  
+  # fill boxes in Canada based on an average of boxes at the same depth layer
+  cpue_500 <- AFSC_boxes %>% filter(botz< -500, boundary==F) %>% pull(all_years_kgkm2) %>% mean()
+  cpue_200 <- AFSC_boxes %>% filter(between(botz,-500,-200), boundary==F) %>% pull(all_years_kgkm2) %>% mean()
+  cpue_100 <- AFSC_boxes %>% filter(between(botz,-200,-100), boundary==F) %>% pull(all_years_kgkm2) %>% mean()
+  cpue_30 <- AFSC_boxes %>% filter(between(botz,-100,-30), boundary==F) %>% pull(all_years_kgkm2) %>% mean()
+  cpue_0 <- AFSC_boxes %>% filter(between(botz,-30,0), boundary==F) %>% pull(all_years_kgkm2) %>% mean()
+  
+  DFO_boxes <- all_boxes %>%
+    filter(box_id > 91) %>%
+    rowwise() %>%
+    mutate(all_years_kgkm2 = ifelse(botz < -500, cpue_500, 
+                                    ifelse(between(botz,-500,-200), cpue_200,
+                                           ifelse(between(botz,-200,-100), cpue_100,
+                                                  ifelse(between(botz,-100,-30), cpue_30, 
+                                                         ifelse(between(botz,-30,0), cpue_0, 0)))))) %>%
+    ungroup() %>%
+    mutate(biomass = all_years_kgkm2*area*1e-06*1e-03)
+  
+  all_boxes <- rbind(AFSC_boxes,DFO_boxes) %>%
+    rowwise() %>%
+    mutate(biomass = ifelse(isTRUE(boundary) | botz==0,0,biomass)) %>%
+    ungroup() %>%
+    mutate(prop = biomass/sum(biomass)) # calculate proportion
+  
+  
+  # replace zeroes with minimum values
+  min_prop <- all_boxes %>% filter(prop>0, boundary==F, botz<0) %>% pull(prop) %>% min()
+  max_prop <- all_boxes %>% filter(prop>0, boundary==F, botz<0) %>% pull(prop) %>% max()
+  
+  box_no <- all_boxes %>% filter(prop==0, boundary==F, botz<0) %>% nrow()
+  
+  all_boxes$prop[all_boxes$prop==0 & all_boxes$boundary==F & all_boxes$botz<0] <- min_prop
+  all_boxes$prop[all_boxes$prop==max_prop] <- all_boxes$prop[all_boxes$prop==max_prop] - (box_no*min_prop)
+  
+  # print out figure and save it
+  p <- all_boxes %>% ggplot()+
+    geom_sf(aes(fill=log1p(biomass)/area))+
+    scale_fill_viridis()+
+    theme_bw()
+  
+  ggsave(paste0(this_group,'_s1_s4.png'),p,width=10,height=4)
+  
+  # write out file
+  all_boxes %>% st_set_geometry(NULL) %>% select(box_id,prop) %>% write.csv(paste0(this_group,'_s1_s4.csv'), row.names = FALSE)
+}
+```
+
+Apply to FOS.
+```{r}
+fill_BC_and_zeroes(afsc_path,'Forage_slopeA_AFSC')
+```
+
+## Benthic carnivores
+
+Same situation as the forage fish slope - score of 3 for RACE-GAP and 4 for DFO. Drop model for DFO and approximate biomass in BC boxes
+```{r}
+fill_BC_and_zeroes(afsc_path,'Benthic_carnivoresA_AFSC')
+```
+
+**Note**: the Benthic carnivores groups is mostly composed of polychaete worms, and its Grouptype in the Groups.csv file is LG_INF (large infauna). The bottom trawl tows are likely ill-suited to sample infauna, and a better option here may be to rely on substrate type instead, assuming that the biomass of this group and of other infaunal groups could be better approximated by the proportion of soft substrate in the box, rather than anything else. 
+
+## Tanner crab
+
+The model for tanner crab converged and was ranked with 2 for the RACE data, but did not converge for the DFO data. We use the distributions from the RACE model and approximate the distirbutions in Canada based on the assumption that they are based on depth. 
+```{r}
+fill_BC_and_zeroes(afsc_path,'Crab_tannerA_AFSC')
+```
+
+As for many other species, estimates for BC may or may not make sense. Here we approximate them based on depth, but this results in a break from SE Alaska, with higher abundance in BC than in SE Alaska. There is no targeted commercial fishery of Tanner crabs in Britis Columbia, although fisheries [are being explored](https://www.dfo-mpo.gc.ca/species-especes/profiles-profils/tanner-crab-crabe-neiges-pac-eng.html). *C. bairdii*, which makes up >90% of the Tanner crab biomass in the RACE bottom trawl surveys, should occur most often inshore, often in inlets and waters <200 m. This is the opposite of what sdmTMB finds based on bottom trawl data. Keep an eye on this group, for now the best we have are these distributions. Regional differences are still somewhat captured. 
+
+![Tanner crab in Alaska](tanner_snow_largemap.jpg).
+
+## King crab
+
+The model for king crab was based on minimal points in BC and was thus discarded: the GOA model converged but was also based on very few data points. King crab abundance was predicted by sdmTMB on the slope (likely overpredicted too), based on bottom trawl catches. King crab is not abundant in the GOA, and the remaining stocks seem to be around Kodia Island (e.g. blue king crab in Olga Bay, sse [here](file:///C:/Users/Alberto%20Rovellini/Downloads/FAO-RFM-AK_BSAI-King-and-Snow-Crab-Full-Assessment-and-Certification-Report_Public-Release_28_May_2012.pdf)). Here, we fill the BC and empty boxes as with tanner crab, but it may result in oversetimates of king crab in some areas. Give the low biomass this may not be a large issue.
+```{r}
+fill_BC_and_zeroes(afsc_path,'Crab_kingA_AFSC')
+```
+
+This results in a high density in box 65 (south of PWS). Keep an eye on this.
+
+## Non-pandalid shrimps
+
+The group other shrimps was ranked 3 in the RACE sdmTMB model, and 4 (converged but few data points) in the DFO model. Other than making assumptions about habitat associations and assigning them to boxes based on substrate, SDMs based on bottom trawl data is the best we can do. 
+```{r}
+fill_BC_and_zeroes(afsc_path,'Shrimp_otherA_AFSC')
+```
+
+There is a big aggregation in box 65, which is a very thin deep slope box. This may cause issues, and it is likely caused by very few particularly large hauls in the area. Consider downscaling this particula box if we notice inopportune aggregations. 
+
+# Distributions based on habitat cover
+
+## Infauna
+
+Infaunal groups like polychaetes, other worms, Amphipods, etc., are probably not really well sampled by the bottom trawl surveys. Kerim said there is very little data when it comes to bottom grabs in the GOA, so for groups like BO, BC, and BD it may be best to base the distributions on the substrate type, as these are such generic and highly-aggregated groups that there is no reason to believe they would not be more or less ubiquitous. 
+
+To add a further complication to this, the substrate data we got from Bob McCounnaghey does not all the way to the eastern end of the model domain. ![BC](C:/Users/Alberto Rovellini/Documents/GOA/Bottom_cover/Images/GOA20_folk.png). 
+
+Read in the habitat proportions calculated in .
+```{r}
+habitats <- read.csv('C:/Users/Alberto Rovellini/Documents/GOA/Bottom_cover/abiotic_habitat.csv', header = TRUE)
+```
+
+Let's approximate things this way:
+
+1. Discard hard substrate and pool soft ones.
+2. Multiply by box area to have an 'amount' in each box.
+3. Divide each area by the total area of the model domain, excluding boundary and island boxes.
+
+Use those values as first approximation of the spatial distributions of infaunal groups. An improvement here will be finding habitat / sediment data from BC.
+```{r}
+goa_area <- atlantis_box %>% filter(boundary==F, botz<0) %>% pull(area) %>% sum() # NOTE: no boundary and island boxes!!!
+
+habitats_soft <- habitats %>% 
+  filter(atlantis_class != 'Reef') %>%
+  group_by(.bx0,botz,area,boundary) %>%
+  summarise(soft_cover = sum(cover)) %>%
+  ungroup() %>%
+  mutate(soft_area = soft_cover*area,
+         prop = soft_area/sum(soft_area))
+```
+
+View.
+```{r}
+atlantis_box %>% left_join(habitats_soft, by = '.bx0') %>%
+  ggplot()+
+  geom_sf(aes(fill = soft_cover))+
+  scale_fill_viridis()+
+  theme_minimal()
+```
+
+Write out to use for BC, BD, BO.
+```{r}
+habitats_soft %>% select(.bx0,prop) %>% write.csv('infauna_s1_s4.csv', row.names = FALSE)
+```
+
+# Distributions based on heuristics
+
+These are groups for which there is no information in the bottom trawl surveys (i.e., no sdmTMB maps) or any other gulf-wide data source (and are of limited importance in the scope of the model). We can use some heuristic principles, like depth, distance from coast, etc.
+
+## Macroalgae
+
+These will not be important. Not worth going into coastal data, let's assume only boxes shallower than 30 m will have a presence of macroalgae, and let's use the estimate of 0.87725 t/km$^2$ from Aydin et al. (2007) to work out the spatial distributions.
+```{r}
+aydin <- 0.87725 #t/km2
+
+macroalgae_s1_s4 <- atlantis_box %>%
+  rowwise() %>%
+  mutate(density_kgkm2=ifelse(between(botz,-30,-1), aydin*1000, 0)) %>%
+  ungroup() %>%
+  mutate(biomass = density_kgkm2*area*1e-6,
+         prop = biomass/sum(biomass))
+
+# view
+macroalgae_s1_s4 %>%
+  ggplot()+
+  geom_sf(aes(fill=biomass/area))+
+  scale_fill_viridis()+
+  theme_minimal()
+
+# write out
+macroalgae_s1_s4 %>% st_set_geometry(NULL) %>% select(box_id,prop) %>% write.csv('macroalgae_s1_s4.csv', row.names = FALSE)
+```
+
+If we wanted to refine this, we would probably overlap depth and rocky substrate, since some shallow areas may be occupied by sandy or muddy bottom with limited algal cover. Refining this to the extent of using data sets of benthic cover in coastal areas is probably not worth it given the coarse resolution we have in coastal areas in Atlantis GOA.

@@ -1,0 +1,111 @@
+---
+title: "Juvenile salmon from GOAIERP"
+author: "Alberto Rovellini"
+date: "12/3/2021"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(rbgm)
+library(sf)
+library(maps)
+library(mapdata)
+library(viridis)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+
+This document produces distribution maps for juvenile salmon in the GOA based on the GOAIERP survey data analysed with sdmTMB. The sdmTMB workflow was based on distance from shore.
+
+Some notes:
+
+1. The surveys really only focus on the central GOA, and the sdmTMB predictions span from AI to BC. This is likely a big approximation and may be outright wrong.
+2. From Jamal, regarding the designation of life stages: 'The juvenile and immature designations are for salmon. Juvenile is the first year at sea (will turn 1 Jan 1st) and immature are salmon older than 1st year of life in the ocean'. Not much adult salmon in that data, at all, only some undetermined sockeye. Here I am only using the juveniles (J) to map distributions, same as we used J only for the diets.
+3. No seasonal definition here, and since these are summer surveys really that is what we are deriving - summer distributions.
+
+So many limitations, but better than forcing them as Ruggerone and Irvine (2018). 
+
+
+Read in the biomass estimates from the GOAIERP workflow.
+```{r}
+chinook_data <- read.csv('C:/Users/Alberto Rovellini/Documents/GOA/SDM/GOAIERP/output/biomass/SCH_J_GOAIERP.csv')
+chum_data <- read.csv('C:/Users/Alberto Rovellini/Documents/GOA/SDM/GOAIERP/output/biomass/SCM_J_GOAIERP.csv')
+coho_data <- read.csv('C:/Users/Alberto Rovellini/Documents/GOA/SDM/GOAIERP/output/biomass/SCO_J_GOAIERP.csv')
+pink_data <- read.csv('C:/Users/Alberto Rovellini/Documents/GOA/SDM/GOAIERP/output/biomass/SPI_J_GOAIERP.csv')
+sockeye_data <- read.csv('C:/Users/Alberto Rovellini/Documents/GOA/SDM/GOAIERP/output/biomass/SSO_J_GOAIERP.csv')
+```
+
+Read in spatial data.
+```{r}
+atlantis_bgm <- read_bgm('data/GOA_WGS84_V4_final.bgm')
+atlantis_box <- atlantis_bgm %>% box_sf()
+atlantis_bbox <- atlantis_box %>% st_bbox()
+atlantis_crs <- atlantis_bgm$extra$projection
+
+# some coast
+# add coastline 
+coast <- map("worldHires", regions = c("USA","Canada"), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf() %>% st_transform(crs=atlantis_crs) %>% st_combine()
+```
+
+Now expand the biomass output to missing boxes.
+```{r}
+salmon_list <- list(chinook_data,chum_data,coho_data,pink_data,sockeye_data)
+names(salmon_list) <- c('SCH','SCM','SCO','SPI','SSO')
+
+expand_biomass <- function(salmon_data){
+
+  salmon_all_boxes <- atlantis_box %>%
+    select(box_id,botz,boundary,area) %>%
+    full_join(salmon_data, by = c('box_id','boundary')) %>%
+    select(box_id,botz,boundary,biomass,area.x) %>%
+    mutate(biomass = replace_na(biomass,0),
+           prop=biomass/sum(biomass))
+  
+  min_prop <- salmon_all_boxes %>% filter(prop>0, boundary==F, botz<0) %>% pull(prop) %>% min()
+  max_prop <- salmon_all_boxes %>% filter(prop>0, boundary==F, botz<0) %>% pull(prop) %>% max()
+  
+  box_no_salmon <- salmon_all_boxes %>% filter(prop==0, boundary==F, botz<0) %>% nrow()
+  
+  salmon_all_boxes$prop[salmon_all_boxes$prop==0 & salmon_all_boxes$boundary==F & salmon_all_boxes$botz<0] <- min_prop
+  salmon_all_boxes$prop[salmon_all_boxes$prop==max_prop] <- salmon_all_boxes$prop[salmon_all_boxes$prop==max_prop] - (box_no_salmon*min_prop)
+  
+  salmon_all_boxes
+
+}
+
+t<- lapply(salmon_list, expand_biomass)
+
+for(i in 1:length(salmon_list)){
+  # make plots
+  
+  p <- t[[i]] %>%
+    ggplot()+
+    geom_sf(aes(fill=biomass/area.x))+
+    scale_fill_viridis()+
+    geom_sf(data=coast_sf)+
+    coord_sf(xlim=c(atlantis_bbox$xmin,atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin,atlantis_bbox$ymax))+
+    theme_bw()+
+    labs(title=names(salmon_list)[[i]])
+  
+  ggsave(paste0(names(salmon_list)[[i]],'_J.png'),p)
+  
+  #write out table
+  t[[i]] %>% st_set_geometry(NULL) %>% select(box_id,prop) %>% write.csv(paste0(names(salmon_list)[[i]],'_J.csv'), row.names = FALSE)
+}
+```
+
+
+

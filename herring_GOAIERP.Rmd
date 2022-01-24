@@ -1,0 +1,86 @@
+---
+title: "Herring from GOAIERP"
+author: "Alberto Rovellini"
+date: "12/3/2021"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(rbgm)
+library(sf)
+library(maps)
+library(mapdata)
+library(viridis)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+
+This document takes output from the GOAIERP sdmTMB workflow for herring, based on distance from shore, and maps it to the Atlantis boxes. Figures of herring spawning grounds shared with us by Sherri Dressel (ADF&G) are compared to the GOAIERP-derived distributions, keeping in mind that Sherri made clear that offshore distributions are not well known and change a lot between seasons.
+
+*Important*: we will have to come up with seasonal differences, but as a placeholder for now let's focus on summer distributions (that is when the GOAIERP sampling happens).
+
+Read in the biomass estimates from the GOAIERP workflow.
+```{r}
+herring_data <- read.csv('C:/Users/Alberto Rovellini/Documents/GOA/SDM/GOAIERP/output/no_life_stages/biomass/HER_GOAIERP.csv')
+```
+
+Read in spatial data.
+```{r}
+atlantis_bgm <- read_bgm('data/GOA_WGS84_V4_final.bgm')
+atlantis_box <- atlantis_bgm %>% box_sf()
+atlantis_bbox <- atlantis_box %>% st_bbox()
+atlantis_crs <- atlantis_bgm$extra$projection
+
+# some coast
+# add coastline 
+coast <- map("worldHires", regions = c("USA","Canada"), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf() %>% st_transform(crs=atlantis_crs) %>% st_combine()
+```
+
+Now expand the herring biomass output to missing boxes.
+```{r}
+herring_all_boxes <- atlantis_box %>%
+  select(box_id,botz,boundary) %>%
+  full_join(herring_data, by = c('box_id','boundary')) %>%
+  select(box_id,botz,boundary,biomass) %>%
+  mutate(biomass = replace_na(biomass,0),
+         prop=biomass/sum(biomass))
+
+min_prop <- herring_all_boxes %>% filter(prop>0, boundary==F, botz<0) %>% pull(prop) %>% min()
+max_prop <- herring_all_boxes %>% filter(prop>0, boundary==F, botz<0) %>% pull(prop) %>% max()
+
+box_no_herring <- herring_all_boxes %>% filter(prop==0, boundary==F, botz<0) %>% nrow()
+
+herring_all_boxes$prop[herring_all_boxes$prop==0 & herring_all_boxes$boundary==F & herring_all_boxes$botz<0] <- min_prop
+herring_all_boxes$prop[herring_all_boxes$prop==max_prop] <- herring_all_boxes$prop[herring_all_boxes$prop==max_prop] - (box_no_herring*min_prop)
+```
+
+View.
+```{r}
+herring_all_boxes %>%
+  ggplot()+
+  geom_sf(aes(fill=prop))+
+  scale_fill_viridis()+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(atlantis_bbox$xmin,atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin,atlantis_bbox$ymax))+
+  theme_minimal()
+```
+
+Biomass proportions are allocated mainly South of PWS and the stretch between Yakutat Bay and Sitka, with smaller but non-zero proportions in around Kodiak and Haida Gwaii. This matches on a qualitative level with the spatial indications of spawning coastal aggregations provided by Sherri. ![Herring](data/Picture2.png).
+
+Write out this as S1-S4, keeping in mind that this not appropriate for distributions outside the spawning season, and also that when they spawn they are really concentrated in the shallows, so only in coastal boxes. 
+```{r}
+herring_all_boxes %>% st_set_geometry(NULL) %>% select(box_id,prop) %>% write.csv('herring_s1_s4.csv', row.names = FALSE)
+```
